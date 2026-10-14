@@ -1,0 +1,87 @@
+# Fork-only (not part of any upstream PR). Builds the image George's homelab
+# cluster runs (gpritchi/kubernetes_cluster, apps/applications/amdgpu-dra-driver.yaml):
+# upstream develop + the WholeGPUSharing patch (ROCm/k8s-gpu-dra-driver#128).
+# The image is pushed to ghcr.io/gpritchi/k8s-gpu-dra-driver:homelab-<sha> with a
+# build-provenance attestation; the cluster pulls it by digest through zot.
+#
+# Only runs for pushes to the `homelab` branch of this repo, or a manual dispatch on
+# it. There is deliberately no pull_request trigger: nothing a stranger opens can
+# build or publish here. Retire this branch once a release ships the gate.
+name: Homelab image
+
+on:
+  push:
+    branches: [homelab]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: homelab-image
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    if: github.repository == 'gpritchi/k8s-gpu-dra-driver' && github.ref == 'refs/heads/homelab'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ghcr.io/gpritchi/k8s-gpu-dra-driver
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read Go version and tag
+        id: meta
+        run: |
+          set -euo pipefail
+          echo "golang=$(sed -n 's/^GOLANG_VERSION ?= //p' env.mk)" >> "$GITHUB_OUTPUT"
+          echo "tag=homelab-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deployments/container/Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: mode=max
+          sbom: true
+          build-args: |
+            GOLANG_VERSION=${{ steps.meta.outputs.golang }}
+            VERSION=${{ steps.meta.outputs.tag }}
+          tags: ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=AMD DRA driver, develop + WholeGPUSharing (ROCm/k8s-gpu-dra-driver#128), homelab build
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        run: |
+          {
+            echo "### Image"
+            echo '```'
+            echo "${IMAGE}:${{ steps.meta.outputs.tag }}@${{ steps.push.outputs.digest }}"
+            echo '```'
+            echo "Through zot: \`registry.home.test42.ca/${IMAGE}:${{ steps.meta.outputs.tag }}@${{ steps.push.outputs.digest }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

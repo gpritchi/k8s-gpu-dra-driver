@@ -71,6 +71,99 @@ is precautionary here and matters mainly for capacities other drivers may leave
 unset. Devices with unknown VRAM remain allocatable to claims which do not
 reference memory.
 
+### Sharing a whole GPU
+
+With the `WholeGPUSharing` feature gate enabled, full GPUs are published with
+`allowMultipleAllocations: true`. Several ResourceClaims can then be allocated
+the same GPU through Kubernetes consumable capacity (`DRAConsumableCapacity`,
+beta and on by default since Kubernetes 1.36). A claim books part of the GPU's
+`memory` capacity, and the scheduler only places it on a GPU whose remaining
+memory covers the booking
+([example](../example/whole-gpu-sharing.yaml)):
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-4gi
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        exactly:
+          deviceClassName: gpu.amd.com
+          capacity:
+            requests:
+              memory: 4Gi
+```
+
+How capacities are consumed:
+
+- **`memory`:** a claim that does not request it consumes all of it, so plain
+  claims keep exclusive access to the GPU and are never placed on a GPU that is
+  already shared. An explicit request below `1Mi`, including `0`, is rounded up
+  to `1Mi`, so it cannot fit beside an exclusive claim.
+- **`computeUnits` and `simdUnits`:** these default to `0`. Compute is
+  time-shared between processes rather than divided, so a memory-only claim
+  doesn't block others. An explicit request is bookkeeping only: it reserves no
+  compute. It just stops the explicit requests on one GPU from adding up to more
+  than the GPU has.
+- **Unknown VRAM:** a GPU whose VRAM could not be read (`memory` of `0`) is
+  never published as shareable.
+
+#### Scope
+
+The gate applies to whole GPUs only: GPUs in normal mode, and GPUs under
+`AutoPartition` that can't be partitioned. An MI300-class GPU in SPX mode is a
+whole GPU in normal mode and can be shared. Partitions are unaffected: synthetic
+partition devices (`AutoPartition`) and pre-partitioned CPX/DPX/QPX devices keep
+their own allocation rules.
+
+#### Isolation and security
+
+This is scheduler accounting only. The driver does not limit how much VRAM or
+compute a container actually uses.
+
+- **VRAM:** a workload that allocates more than it booked can cause
+  out-of-memory errors in the others. Usable VRAM is also a little less than the
+  published `memory` (driver, firmware and display reservations), so bookings
+  that add up to the whole GPU can still run out. Leave headroom.
+- **Faults:** amdgpu isolates processes by per-process GPU page tables (each
+  has its own GPU virtual address space). But there is no fault isolation: a hang
+  or GPU reset caused by one workload kills every context on that GPU. There is
+  no compute quality-of-service either.
+- **Trust:** any claim can join any GPU that has room. Don't enable this gate on
+  nodes whose GPUs are shared between tenants that don't trust each other.
+
+#### Known limitations
+
+- **VFIO passthrough** (`VFIOPassthrough` gate) needs an exclusive claim. A
+  claim that books only part of a GPU and carries a `VfioDeviceConfig` fails to
+  prepare, because rebinding the GPU to `vfio-pci` would take it from the other
+  sharers.
+- **Admin access:** a claim with `adminAccess: true` goes through the same
+  capacity check as any other (Kubernetes 1.36 and later; unchanged upstream as
+  of October 2026). A plain admin claim
+  needs the whole GPU free, and an explicit one needs at least `1Mi` free. So an
+  admin claim cannot attach to a fully booked GPU.
+- **`allocationMode: All`:** before Kubernetes 1.37, All-mode allocation skips
+  multi-allocation devices that are fully booked, instead of failing. A claim
+  for all GPUs on a node can then succeed with only the GPUs that are still free
+  (kubernetes/kubernetes#140769).
+- **Turning the gate off** while shares exist is unsafe before Kubernetes 1.38.
+  A new claim can be allocated a GPU that still has live shares
+  (kubernetes/kubernetes#140797). Drain the shared workloads first, as for
+  `AutoPartition`.
+- **Claims that already request `memory`:** before this gate, a
+  `capacity.requests.memory` behaved like a minimum-VRAM filter. With the gate
+  on, the same claim books only that much and others can join the GPU. Use a
+  CEL selector on `memory` for a minimum-VRAM filter that stays exclusive.
+- **Enabling the gate on a running cluster:** claims allocated before it was
+  enabled carry no `shareID`, and the scheduler keeps treating them as using
+  the whole GPU. That's safe, but the GPU can only be shared after those
+  workloads are recreated.
+
 ## Attributes for a partition
 
 The following attributes are attached to each GPU partition device:

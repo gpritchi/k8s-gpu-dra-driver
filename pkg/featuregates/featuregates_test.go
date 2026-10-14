@@ -64,6 +64,12 @@ func TestFeatureGatesDefaultOff(t *testing.T) {
 	if fg.Enabled(VFIOPassthrough) {
 		t.Fatalf("VFIOPassthrough should default to false (Alpha)")
 	}
+	if fg.Enabled(AutoPartition) {
+		t.Fatalf("AutoPartition should default to false (Alpha)")
+	}
+	if fg.Enabled(WholeGPUSharing) {
+		t.Fatalf("WholeGPUSharing should default to false (Alpha)")
+	}
 }
 
 func TestFeatureGatesSingletonNonNil(t *testing.T) {
