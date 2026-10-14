@@ -36,11 +36,15 @@ import (
 	"testing"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 )
@@ -232,4 +236,98 @@ func TestPartitionSharesForClaim_DriverAndPoolMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---- WholeGPUSharing: VFIO on a shared GPU ----
+
+func newSharedGPUDevice() *AllocatableDevice {
+	return &AllocatableDevice{AmdGpu: &AmdGpuInfo{
+		PCIAddress:   "0000:03:00.0",
+		MemoryBytes:  16 * 1024 * 1024 * 1024,
+		AllowSharing: true,
+		cardIndex:    1,
+		renderIndex:  128,
+	}}
+}
+
+func TestHoldsPartOfSharedGPU(t *testing.T) {
+	shareID := types.UID("4f6c1a2e-0000-4000-8000-000000000001")
+	full := *resource.NewQuantity(16*1024*1024*1024, resource.BinarySI)
+	part := resource.MustParse("2Gi")
+	notShared := newSharedGPUDevice()
+	notShared.AmdGpu.AllowSharing = false
+
+	tests := map[string]struct {
+		result resourceapi.DeviceRequestAllocationResult
+		device *AllocatableDevice
+		want   bool
+	}{
+		"part of a shared GPU": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": part}},
+			device: newSharedGPUDevice(),
+			want:   true,
+		},
+		"exclusive claim on a shareable GPU consumes all memory": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": full}},
+			device: newSharedGPUDevice(),
+		},
+		"no ShareID": {
+			result: resourceapi.DeviceRequestAllocationResult{},
+			device: newSharedGPUDevice(),
+		},
+		"no consumed capacity recorded": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
+			device: newSharedGPUDevice(),
+		},
+		"sharing off": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": part}},
+			device: notShared,
+		},
+		"not a whole GPU": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": part}},
+			device: &AllocatableDevice{SyntheticPartition: &SyntheticPartitionDevice{}},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, test.want, holdsPartOfSharedGPU(&test.result, test.device))
+		})
+	}
+}
+
+// A claim holding 2Gi of a shared GPU must not be able to rebind the whole GPU
+// to vfio-pci under the other claims using it.
+func TestPrepareDevices_VFIORejectedOnPartOfSharedGPU(t *testing.T) {
+	require.NoError(t, featuregates.FeatureGates().Set("VFIOPassthrough=true"))
+	t.Cleanup(func() { _ = featuregates.FeatureGates().Set("VFIOPassthrough=false") })
+
+	shareID := types.UID("4f6c1a2e-0000-4000-8000-000000000002")
+	state := &DeviceState{allocatable: AllocatableDevices{"gpu-1-128": newSharedGPUDevice()}}
+	claim := &resourceapi.ResourceClaim{
+		ObjectMeta: metav1.ObjectMeta{UID: types.UID("claim-vfio")},
+		Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+			Devices: resourceapi.DeviceAllocationResult{
+				Results: []resourceapi.DeviceRequestAllocationResult{{
+					Request:          "gpu",
+					Driver:           consts.DriverName,
+					Pool:             "node-a",
+					Device:           "gpu-1-128",
+					ShareID:          &shareID,
+					ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": resource.MustParse("2Gi")},
+				}},
+				Config: []resourceapi.DeviceAllocationConfiguration{{
+					Source: resourceapi.AllocationConfigSourceClaim,
+					DeviceConfiguration: resourceapi.DeviceConfiguration{Opaque: &resourceapi.OpaqueDeviceConfiguration{
+						Driver:     consts.DriverName,
+						Parameters: runtime.RawExtension{Raw: []byte(`{"apiVersion":"gpu.resource.amd.com/v1alpha1","kind":"VfioDeviceConfig"}`)},
+					}},
+				}},
+			},
+		}},
+	}
+
+	_, err := state.prepareDevices(claim)
+	require.ErrorContains(t, err, "needs an exclusive allocation")
+	assert.NotNil(t, state.allocatable["gpu-1-128"].AmdGpu, "the GPU must not be converted to VFIO")
+	assert.Nil(t, state.allocatable["gpu-1-128"].Vfio)
 }

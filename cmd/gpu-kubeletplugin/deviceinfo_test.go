@@ -746,12 +746,20 @@ func TestAmdGpuInfo_GetDevice_SharingEnabled(t *testing.T) {
 	require.NotNil(t, d.AllowMultipleAllocations)
 	require.True(t, *d.AllowMultipleAllocations)
 
-	// memory has no RequestPolicy, so a claim that does not request memory
-	// consumes the whole GPU and stays exclusive.
+	// memory defaults to the whole GPU, so a claim that does not request memory
+	// stays exclusive. An explicit request has a floor of 1Mi, so a request for
+	// 0 cannot fit beside an exclusive claim.
 	memory, ok := d.Capacity["memory"]
 	require.True(t, ok)
-	require.Nil(t, memory.RequestPolicy)
 	require.Equal(t, int64(16*1024*1024*1024), memory.Value.Value())
+	require.NotNil(t, memory.RequestPolicy)
+	require.NotNil(t, memory.RequestPolicy.Default)
+	require.Zero(t, memory.RequestPolicy.Default.Cmp(memory.Value))
+	require.NotNil(t, memory.RequestPolicy.ValidRange)
+	require.NotNil(t, memory.RequestPolicy.ValidRange.Min)
+	require.Equal(t, int64(1024*1024), memory.RequestPolicy.ValidRange.Min.Value())
+	require.Nil(t, memory.RequestPolicy.ValidRange.Max)
+	require.Nil(t, memory.RequestPolicy.ValidRange.Step)
 
 	// Compute and SIMD units default to 0 so a memory-only request does not
 	// consume them all.
@@ -774,6 +782,17 @@ func TestAmdGpuInfo_GetDevice_SharingEnabled(t *testing.T) {
 // sharing must stay off or any number of plain claims could land on the GPU.
 func TestAmdGpuInfo_GetDevice_SharingNotPublishedWithZeroMemory(t *testing.T) {
 	d := newSharingTestGPU(true, 0).GetDevice()
+
+	require.Nil(t, d.AllowMultipleAllocations)
+	for name, c := range d.Capacity {
+		require.Nil(t, c.RequestPolicy, "capacity %s", name)
+	}
+}
+
+// Below the 1Mi request floor the memory policy would be invalid (Min above the
+// capacity), so such a GPU is not shared either.
+func TestAmdGpuInfo_GetDevice_SharingNotPublishedBelowRequestFloor(t *testing.T) {
+	d := newSharingTestGPU(true, 512*1024).GetDevice()
 
 	require.Nil(t, d.AllowMultipleAllocations)
 	for name, c := range d.Capacity {

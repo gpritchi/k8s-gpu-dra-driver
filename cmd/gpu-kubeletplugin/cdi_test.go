@@ -22,8 +22,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
 
 	cdiapi "tags.cncf.io/container-device-interface/pkg/cdi"
+	cdispec "tags.cncf.io/container-device-interface/specs-go"
 )
 
 // The common CDI spec must carry the node name that the driver parsed into its
@@ -56,4 +58,56 @@ func TestCreateCommonSpecFileUsesConfiguredNodeName(t *testing.T) {
 
 	require.Contains(t, spec.Devices[0].ContainerEdits.Env, "KUBERNETES_NODE_NAME=node-from-config")
 	require.NotContains(t, spec.Devices[0].ContainerEdits.Env, "KUBERNETES_NODE_NAME=node-from-environment")
+}
+
+func TestCDIDeviceName(t *testing.T) {
+	slot := 2
+	tests := map[string]struct {
+		device *PreparedDevice
+		want   string
+	}{
+		"plain GPU": {
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/gpu-1-128/"},
+			want:   "uid-gpu-1-128",
+		},
+		"no share key (checkpoint from an older driver)": {
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}},
+			want:   "uid-gpu-1-128",
+		},
+		"share of a whole GPU": {
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/gpu-1-128/abc"},
+			want:   "uid-gpu-1-128-share-abc",
+		},
+		"partition slot wins over share": {
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-0-cpx-nps4"}, ShareKey: "uid/gpu/gpu-0-cpx-nps4/abc", PartitionSlot: &slot},
+			want:   "uid-gpu-0-cpx-nps4-slot2",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, test.want, cdiDeviceName("uid", test.device))
+		})
+	}
+}
+
+// One claim with two requests can be allocated two shares of the same whole GPU
+// (WholeGPUSharing). The CDI spec must hold one device per share; duplicate
+// names make WriteSpec reject the spec and the pod never starts.
+func TestCreateClaimSpecFile_TwoSharesOfOneGPU(t *testing.T) {
+	cdiRoot := t.TempDir()
+	handler, err := NewCDIHandler(&Config{flags: &Flags{cdiRoot: cdiRoot, nodeName: "node-a"}})
+	require.NoError(t, err)
+
+	edits := func() *cdiapi.ContainerEdits {
+		return &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{Env: []string{"SHARE=1"}}}
+	}
+	devices := PreparedDevices{
+		{Device: drapbv1.Device{RequestNames: []string{"a"}, DeviceName: "gpu-1-128"}, ShareKey: "claim-uid/a/gpu-1-128/share-a", ContainerEdits: edits()},
+		{Device: drapbv1.Device{RequestNames: []string{"b"}, DeviceName: "gpu-1-128"}, ShareKey: "claim-uid/b/gpu-1-128/share-b", ContainerEdits: edits()},
+	}
+	require.NoError(t, handler.CreateClaimSpecFile("claim-uid", devices))
+
+	ids := handler.GetClaimDevices("claim-uid", devices)
+	require.Len(t, ids, 3) // common + one per share
+	require.NotEqual(t, ids[1], ids[2])
 }

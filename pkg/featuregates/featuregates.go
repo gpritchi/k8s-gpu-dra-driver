@@ -76,9 +76,13 @@ const AutoPartition featuregate.Feature = "AutoPartition"
 //
 // This is scheduler accounting only: nothing limits how much VRAM or compute a
 // container actually uses, so workloads must stay within what they request.
-// Requires Kubernetes 1.34+ with DRAConsumableCapacity enabled (beta and on by
-// default since 1.36); without it the API server drops allowMultipleAllocations
-// and devices stay exclusive.
+// Requires Kubernetes 1.36+, where DRAConsumableCapacity is beta and on by
+// default (1.34-1.35 have it as alpha, untested). Without it the API server
+// drops allowMultipleAllocations and devices stay exclusive.
+//
+// Turning the gate off while shares exist is unsafe before Kubernetes 1.38: a
+// new claim can be allocated a GPU that still has live shares. Drain the shared
+// workloads first.
 const WholeGPUSharing featuregate.Feature = "WholeGPUSharing"
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
