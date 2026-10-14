@@ -302,12 +302,24 @@ func TestPrepareDevices_VFIORejectedOnPartOfSharedGPU(t *testing.T) {
 	t.Cleanup(func() { _ = featuregates.FeatureGates().Set("VFIOPassthrough=false") })
 
 	shareID := types.UID("4f6c1a2e-0000-4000-8000-000000000002")
-	state := &DeviceState{allocatable: AllocatableDevices{"gpu-1-128": newSharedGPUDevice()}}
+	exclusiveShareID := types.UID("4f6c1a2e-0000-4000-8000-000000000003")
+	exclusive := newSharedGPUDevice()
+	exclusive.AmdGpu.PCIAddress = "0000:04:00.0"
+	state := &DeviceState{allocatable: AllocatableDevices{"gpu-1-128": newSharedGPUDevice(), "gpu-2-129": exclusive}}
 	claim := &resourceapi.ResourceClaim{
 		ObjectMeta: metav1.ObjectMeta{UID: types.UID("claim-vfio")},
 		Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
 			Devices: resourceapi.DeviceAllocationResult{
 				Results: []resourceapi.DeviceRequestAllocationResult{{
+					// Exclusive (all memory) and listed first: it must not be left
+					// converted to VFIO when the claim is rejected.
+					Request:          "whole",
+					Driver:           consts.DriverName,
+					Pool:             "node-a",
+					Device:           "gpu-2-129",
+					ShareID:          &exclusiveShareID,
+					ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": *resource.NewQuantity(16*1024*1024*1024, resource.BinarySI)},
+				}, {
 					Request:          "gpu",
 					Driver:           consts.DriverName,
 					Pool:             "node-a",
@@ -328,6 +340,8 @@ func TestPrepareDevices_VFIORejectedOnPartOfSharedGPU(t *testing.T) {
 
 	_, err := state.prepareDevices(claim)
 	require.ErrorContains(t, err, "needs an exclusive allocation")
-	assert.NotNil(t, state.allocatable["gpu-1-128"].AmdGpu, "the GPU must not be converted to VFIO")
-	assert.Nil(t, state.allocatable["gpu-1-128"].Vfio)
+	for _, name := range []string{"gpu-1-128", "gpu-2-129"} {
+		assert.NotNil(t, state.allocatable[name].AmdGpu, "%s must not be converted to VFIO", name)
+		assert.Nil(t, state.allocatable[name].Vfio, name)
+	}
 }

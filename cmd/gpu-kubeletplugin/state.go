@@ -538,6 +538,25 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
 	)
 
+	// A result holding only part of a shared GPU (WholeGPUSharing) may have
+	// neighbours on it. Rebinding it to vfio-pci would pull the device from
+	// under them, so passthrough needs an exclusive allocation: a claim that
+	// requests no memory. Checked before the loop below converts any GPU, so a
+	// rejected claim leaves no device half-converted.
+	if featuregates.Enabled(featuregates.VFIOPassthrough) {
+		for _, result := range claim.Status.Allocation.Devices.Results {
+			allocDev, exists := s.allocatable[result.Device]
+			if result.Driver != consts.DriverName || !exists || !holdsPartOfSharedGPU(&result, allocDev) {
+				continue
+			}
+			for _, c := range configs {
+				if _, ok := c.Config.(*configapi.VfioDeviceConfig); ok && (len(c.Requests) == 0 || slices.Contains(c.Requests, result.Request)) {
+					return nil, fmt.Errorf("VFIO passthrough of %s needs an exclusive allocation, but request %q holds a share of it; drop the capacity request", result.Device, result.Request)
+				}
+			}
+		}
+	}
+
 	// Track per-claim VFIO conversions so the long-lived allocatable entry
 	// stays immutable. Restored on unprepare or rollback.
 	s.claimVfioConversions = make(map[string]*AmdGpuInfo)
@@ -560,14 +579,9 @@ func (s *DeviceState) prepareDevices(claim *resourceapi.ResourceClaim) (Prepared
 				if !featuregates.Enabled(featuregates.VFIOPassthrough) {
 					continue
 				}
-				// A result holding only part of a shared GPU (WholeGPUSharing) may
-				// have neighbours on it. Rebinding it to vfio-pci would pull the
-				// device from under them, so passthrough needs an exclusive
-				// allocation: a claim that requests no memory.
+				// Never convert part of a shared GPU, even for a config scoped to
+				// another request (the pre-pass above rejected matching ones).
 				if holdsPartOfSharedGPU(&result, allocDev) {
-					if len(c.Requests) == 0 || slices.Contains(c.Requests, result.Request) {
-						return nil, fmt.Errorf("VFIO passthrough of %s needs an exclusive allocation, but request %q holds a share of it; drop the capacity request", result.Device, result.Request)
-					}
 					continue
 				}
 				if !isVFIO {

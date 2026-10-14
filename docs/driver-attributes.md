@@ -129,8 +129,8 @@ compute a container actually uses.
   out-of-memory errors in the others. Usable VRAM is also a little less than the
   published `memory` (driver, firmware and display reservations), so bookings
   that add up to the whole GPU can still run out. Leave headroom.
-- **Faults:** amdgpu gives each process its own GPU virtual address space, so
-  sharers can't read each other's memory. But there is no fault isolation: a hang
+- **Faults:** amdgpu isolates processes by per-process GPU page tables (each
+  has its own GPU virtual address space). But there is no fault isolation: a hang
   or GPU reset caused by one workload kills every context on that GPU. There is
   no compute quality-of-service either.
 - **Trust:** any claim can join any GPU that has room. Don't enable this gate on
@@ -143,7 +143,8 @@ compute a container actually uses.
   prepare, because rebinding the GPU to `vfio-pci` would take it from the other
   sharers.
 - **Admin access:** a claim with `adminAccess: true` goes through the same
-  capacity check as any other on Kubernetes 1.36 and 1.37. A plain admin claim
+  capacity check as any other (Kubernetes 1.36 and later; unchanged upstream as
+  of October 2026). A plain admin claim
   needs the whole GPU free, and an explicit one needs at least `1Mi` free. So an
   admin claim cannot attach to a fully booked GPU.
 - **`allocationMode: All`:** before Kubernetes 1.37, All-mode allocation skips

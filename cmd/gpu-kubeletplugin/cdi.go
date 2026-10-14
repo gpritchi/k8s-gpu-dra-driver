@@ -126,13 +126,15 @@ func cdiDeviceName(claimUID string, device *PreparedDevice) string {
 }
 
 // shareIDFromKey returns the ShareID part of a share key (see ShareKey), or ""
-// when the allocation has none.
+// when the allocation has none. The ShareID is the last segment: the request
+// name before it may itself contain "/" (a firstAvailable subrequest is
+// "<request>/<subrequest>"), but claim UIDs, device names and ShareIDs never do.
 func shareIDFromKey(shareKey string) string {
-	parts := strings.SplitN(shareKey, "/", 4)
-	if len(parts) != 4 {
+	i := strings.LastIndex(shareKey, "/")
+	if i < 0 {
 		return ""
 	}
-	return parts[3]
+	return shareKey[i+1:]
 }
 
 func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, devices PreparedDevices) error {

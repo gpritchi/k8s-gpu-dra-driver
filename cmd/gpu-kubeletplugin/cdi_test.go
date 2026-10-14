@@ -78,6 +78,14 @@ func TestCDIDeviceName(t *testing.T) {
 			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/gpu-1-128/abc"},
 			want:   "uid-gpu-1-128-share-abc",
 		},
+		"firstAvailable subrequest, no share": {
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/big/gpu-1-128/"},
+			want:   "uid-gpu-1-128",
+		},
+		"firstAvailable subrequest, share": {
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/big/gpu-1-128/abc"},
+			want:   "uid-gpu-1-128-share-abc",
+		},
 		"partition slot wins over share": {
 			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-0-cpx-nps4"}, ShareKey: "uid/gpu/gpu-0-cpx-nps4/abc", PartitionSlot: &slot},
 			want:   "uid-gpu-0-cpx-nps4-slot2",
