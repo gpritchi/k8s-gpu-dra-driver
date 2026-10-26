@@ -4,9 +4,9 @@
 # The image is pushed to ghcr.io/gpritchi/k8s-gpu-dra-driver:homelab-<sha> with a
 # build-provenance attestation; the cluster pulls it by digest through zot.
 #
-# Only runs for pushes to the `homelab` branch of this repo, or a manual dispatch on
-# it. There is deliberately no pull_request trigger: nothing a stranger opens can
-# build or publish here. Retire this branch once a release ships the gate.
+# Publishes on pushes to `homelab`, or a write-authorized manual dispatch on a
+# review branch so its exact artifact can be verified before deployment. There
+# is no pull_request publishing trigger. Retire once upstream ships the gate.
 name: Homelab image
 
 on:
@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   build-push:
-    if: github.repository == 'gpritchi/k8s-gpu-dra-driver' && github.ref == 'refs/heads/homelab'
+    if: github.repository == 'gpritchi/k8s-gpu-dra-driver' && (github.ref == 'refs/heads/homelab' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     permissions:
       contents: read

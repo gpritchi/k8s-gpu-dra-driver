@@ -85,6 +85,12 @@ const AutoPartition featuregate.Feature = "AutoPartition"
 // workloads first.
 const WholeGPUSharing featuregate.Feature = "WholeGPUSharing"
 
+// DRAListTypeAttributes enables publishing list-valued DRA attributes,
+// including resource.kubernetes.io/numaNode. The Kubernetes feature gate with
+// the same name must be enabled in the apiserver and scheduler before this
+// driver setting is enabled.
+const DRAListTypeAttributes featuregate.Feature = "DRAListTypeAttributes"
+
 var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 	DeviceMetadata: {
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
@@ -96,6 +102,9 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
 	},
 	WholeGPUSharing: {
+		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
+	},
+	DRAListTypeAttributes: {
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
 	},
 }
