@@ -68,6 +68,23 @@ const VFIOPassthrough featuregate.Feature = "VFIOPassthrough"
 // pod from before the switch is still using, which resets that GPU mid-workload.
 const AutoPartition featuregate.Feature = "AutoPartition"
 
+// WholeGPUSharing lets several ResourceClaims share one whole (unpartitioned)
+// GPU through Kubernetes consumable capacity (KEP-5075). Whole-GPU devices are
+// published with allowMultipleAllocations, and a claim may request part of the
+// device's memory capacity (capacity.requests.memory). A claim that requests no
+// memory still consumes all of it, so existing claims keep exclusive access.
+//
+// This is scheduler accounting only: nothing limits how much VRAM or compute a
+// container actually uses, so workloads must stay within what they request.
+// Requires Kubernetes 1.36+, where DRAConsumableCapacity is beta and on by
+// default (1.34-1.35 have it as alpha, untested). Without it the API server
+// drops allowMultipleAllocations and devices stay exclusive.
+//
+// Turning the gate off while shares exist is unsafe before Kubernetes 1.38: a
+// new claim can be allocated a GPU that still has live shares. Drain the shared
+// workloads first.
+const WholeGPUSharing featuregate.Feature = "WholeGPUSharing"
+
 // DRAListTypeAttributes enables publishing list-valued DRA attributes,
 // including resource.kubernetes.io/numaNode. The Kubernetes feature gate with
 // the same name must be enabled in the apiserver and scheduler before this
@@ -82,6 +99,9 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.VersionedSpecs{
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
 	},
 	AutoPartition: {
+		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
+	},
+	WholeGPUSharing: {
 		{Default: false, PreRelease: featuregate.Alpha, Version: version.MajorMinor(0, 1)},
 	},
 	DRAListTypeAttributes: {
