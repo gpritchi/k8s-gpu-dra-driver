@@ -70,6 +70,9 @@ func TestFeatureGatesDefaultOff(t *testing.T) {
 	if fg.Enabled(WholeGPUSharing) {
 		t.Fatalf("WholeGPUSharing should default to false (Alpha)")
 	}
+	if fg.Enabled(DRAListTypeAttributes) {
+		t.Fatalf("DRAListTypeAttributes should default to false (Alpha)")
+	}
 }
 
 func TestFeatureGatesSingletonNonNil(t *testing.T) {
