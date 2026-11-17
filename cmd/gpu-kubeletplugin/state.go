@@ -51,6 +51,7 @@ import (
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/kmm"
 	"golang.org/x/sys/unix"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	klog "k8s.io/klog/v2"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
@@ -633,6 +634,25 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
 	)
 
+	// A result holding only part of a shared GPU (WholeGPUSharing) may have
+	// neighbours on it. Rebinding it to vfio-pci would pull the device from
+	// under them, so passthrough needs an exclusive allocation: a claim that
+	// requests no memory. Checked before the loop below converts any GPU, so a
+	// rejected claim leaves no device half-converted.
+	if featuregates.Enabled(featuregates.VFIOPassthrough) {
+		for _, result := range claim.Status.Allocation.Devices.Results {
+			allocDev, exists := s.allocatable[result.Device]
+			if result.Driver != consts.DriverName || !exists || !holdsPartOfSharedGPU(&result, allocDev) {
+				continue
+			}
+			for _, c := range configs {
+				if _, ok := c.Config.(*configapi.VfioDeviceConfig); ok && (len(c.Requests) == 0 || slices.Contains(c.Requests, result.Request)) {
+					return nil, fmt.Errorf("VFIO passthrough of %s needs an exclusive allocation, but request %q holds a share of it; drop the capacity request", result.Device, result.Request)
+				}
+			}
+		}
+	}
+
 	// On any failure below, undo every VFIO bind and GPU->VFIO conversion made
 	// for this claim, so a rejected claim never leaves devices converted. A
 	// device whose rebind fails stays converted and recorded (see
@@ -666,6 +686,11 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 			switch c.Config.(type) {
 			case *configapi.VfioDeviceConfig:
 				if !featuregates.Enabled(featuregates.VFIOPassthrough) {
+					continue
+				}
+				// Never convert part of a shared GPU, even for a config scoped to
+				// another request (the pre-pass above rejected matching ones).
+				if holdsPartOfSharedGPU(&result, allocDev) {
 					continue
 				}
 				if !isVFIO {
@@ -793,6 +818,23 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 	}
 
 	return preparedDevices, nil
+}
+
+// holdsPartOfSharedGPU reports whether result books less than all the memory of
+// a whole GPU published as shareable (WholeGPUSharing), so other claims may be
+// allocated the same GPU. With sharing on, every allocation of such a GPU gets
+// a ShareID, including exclusive ones, which consume all of its memory; only the
+// consumed capacity tells them apart. A result without recorded consumption
+// (the scheduler's DRAConsumableCapacity off) is exclusive.
+func holdsPartOfSharedGPU(result *resourceapi.DeviceRequestAllocationResult, allocDev *AllocatableDevice) bool {
+	if result.ShareID == nil || allocDev.AmdGpu == nil || !allocDev.AmdGpu.AllowSharing {
+		return false
+	}
+	consumed, ok := result.ConsumedCapacity["memory"]
+	if !ok {
+		return false
+	}
+	return consumed.Cmp(*resource.NewQuantity(int64(allocDev.AmdGpu.MemoryBytes), resource.BinarySI)) < 0
 }
 
 func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices) error {
