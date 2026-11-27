@@ -51,6 +51,7 @@ import (
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/kmm"
 	"golang.org/x/sys/unix"
 	resourceapi "k8s.io/api/resource/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	klog "k8s.io/klog/v2"
 	drapbv1 "k8s.io/kubelet/pkg/apis/dra/v1beta1"
@@ -81,6 +82,13 @@ type PreparedDevice struct {
 	// ShareKey identifies the allocation share this device represents (see
 	// ShareKey). Persisted so Unprepare releases the exact slot that was reserved.
 	ShareKey string `json:"shareKey,omitempty"`
+
+	// ShareID is the allocation's ShareID when this device is a share of a whole
+	// GPU (WholeGPUSharing): one claim may hold several shares of one GPU, and the
+	// CDI device name needs it to tell them apart. Empty for everything else, so
+	// checkpoints without whole-GPU shares stay readable by drivers that predate
+	// the field (see CheckpointV1).
+	ShareID string `json:"shareID,omitempty"`
 }
 
 func (pds PreparedDevices) GetDevices() []*drapbv1.Device {
@@ -227,6 +235,9 @@ func (s *DeviceState) Prepare(claim *resourceapi.ResourceClaim) (_ []*drapbv1.De
 	}
 
 	if err := validateNoOverlappingPreparedDevices(claim, preparedClaims); err != nil {
+		return nil, err
+	}
+	if err := validateWholeGPUShares(claim, preparedClaims, s.allocatable); err != nil {
 		return nil, err
 	}
 
@@ -633,6 +644,23 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 		&OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()},
 	)
 
+	// A result holding only part of a shared GPU (WholeGPUSharing) may have
+	// neighbours on it. Rebinding it to vfio-pci would pull the device from
+	// under them, so passthrough needs an exclusive allocation: a claim that
+	// requests no memory. Checked before the loop below converts any GPU, so a
+	// rejected claim leaves no device half-converted.
+	if featuregates.Enabled(featuregates.VFIOPassthrough) {
+		for _, result := range claim.Status.Allocation.Devices.Results {
+			allocDev, exists := s.allocatable[result.Device]
+			if result.Driver != consts.DriverName || !exists || !holdsPartOfSharedGPU(&result, allocDev) {
+				continue
+			}
+			if vfioConfigWins(configs, &result) {
+				return nil, fmt.Errorf("VFIO passthrough of %s needs an exclusive allocation, but request %q holds a share of it; drop the capacity request", result.Device, result.Request)
+			}
+		}
+	}
+
 	// On any failure below, undo every VFIO bind and GPU->VFIO conversion made
 	// for this claim, so a rejected claim never leaves devices converted. A
 	// device whose rebind fails stays converted and recorded (see
@@ -779,20 +807,135 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 
 			// Record the partition slot so the CDI device name is unique per share
 			// and can be rebuilt identically on unprepare.
-			if allocDev := s.allocatable[result.Device]; allocDev != nil && allocDev.SyntheticPartition != nil && s.partitionState != nil {
+			allocDev := s.allocatable[result.Device]
+			if allocDev != nil && allocDev.SyntheticPartition != nil && s.partitionState != nil {
 				gpuIndex := allocDev.SyntheticPartition.GPUIndex
 				if slot, ok := s.partitionState.GetAssignedSlot(gpuIndex, key); ok {
 					device.PartitionSlot = &slot
 				}
 			}
+			device.ShareID = wholeGPUShareID(result, allocDev)
 
-			// Built after PartitionSlot is set: the CDI device name embeds the slot.
+			// Built after PartitionSlot and ShareID are set: the CDI device name
+			// embeds them.
 			device.CdiDeviceIds = s.cdi.GetClaimDevices(claimUID, []*PreparedDevice{device})
 			preparedDevices = append(preparedDevices, device)
 		}
 	}
 
 	return preparedDevices, nil
+}
+
+// wholeGPUShareID returns the ShareID to record on a prepared device, or "" when
+// it is not a partial share of a whole GPU. Such a share has no partition slot,
+// so its ShareID keeps its CDI device name unique within the claim, and a
+// recorded ShareID tells validateWholeGPUShares that the device may have other
+// sharers. Exclusive allocations (which also carry a ShareID while sharing is
+// on) and synthetic partitions record none, so their checkpoints stay readable
+// by drivers that predate the field.
+func wholeGPUShareID(result *resourceapi.DeviceRequestAllocationResult, allocDev *AllocatableDevice) string {
+	if !holdsPartOfSharedGPU(result, allocDev) {
+		return ""
+	}
+	return string(*result.ShareID)
+}
+
+// wholeGPUOf returns the whole GPU behind allocDev: the GPU itself, or the GPU
+// a VFIO entry was converted from. nil for partitions and pre-discovered VFIO
+// devices.
+func wholeGPUOf(allocDev *AllocatableDevice) *AmdGpuInfo {
+	switch {
+	case allocDev == nil:
+		return nil
+	case allocDev.AmdGpu != nil:
+		return allocDev.AmdGpu
+	case allocDev.Vfio != nil:
+		return allocDev.Vfio.convertedFrom
+	}
+	return nil
+}
+
+// holdsPartOfSharedGPU reports whether result books less than all the memory of
+// a whole GPU (WholeGPUSharing), so other claims may be allocated the same GPU.
+// With sharing on, every allocation of a whole GPU gets a ShareID, including
+// exclusive ones, which consume all of its memory; only the consumed capacity
+// tells them apart. The decision uses the allocation, not whether this plugin
+// instance currently publishes the GPU as shareable: a share allocated earlier
+// still has neighbours if the gate has since been turned off. When VRAM is
+// unknown (0) any recorded consumption counts as a share. A result without
+// recorded consumption (the scheduler's DRAConsumableCapacity off) is exclusive.
+func holdsPartOfSharedGPU(result *resourceapi.DeviceRequestAllocationResult, allocDev *AllocatableDevice) bool {
+	gpu := wholeGPUOf(allocDev)
+	if result.ShareID == nil || gpu == nil {
+		return false
+	}
+	consumed, ok := result.ConsumedCapacity["memory"]
+	if !ok {
+		return false
+	}
+	return gpu.MemoryBytes == 0 || consumed.Cmp(*resource.NewQuantity(int64(gpu.MemoryBytes), resource.BinarySI)) < 0
+}
+
+// validateWholeGPUShares extends validateNoOverlappingPreparedDevices to whole
+// GPUs (WholeGPUSharing). That check skips every result with a ShareID, and
+// with sharing on even exclusive whole-GPU allocations carry one. A whole GPU
+// may be prepared for two claims only when both hold a partial share of it: an
+// exclusive allocation on either side means the scheduler gave out a GPU that
+// is still in use (e.g. a force-deleted pod whose container still runs).
+func validateWholeGPUShares(claim *resourceapi.ResourceClaim, preparedClaims PreparedClaims, allocatable AllocatableDevices) error {
+	if claim.Status.Allocation == nil {
+		return nil
+	}
+	type poolDevice struct{ pool, device string }
+	partial := make(map[poolDevice]bool)
+	for _, result := range claim.Status.Allocation.Devices.Results {
+		allocDev := allocatable[result.Device]
+		if result.Driver != consts.DriverName || result.ShareID == nil || wholeGPUOf(allocDev) == nil {
+			continue
+		}
+		key := poolDevice{result.Pool, result.Device}
+		// One claim never holds two results on a GPU unless both are shares.
+		partial[key] = holdsPartOfSharedGPU(&result, allocDev)
+	}
+	if len(partial) == 0 {
+		return nil
+	}
+
+	claimUID := string(claim.UID)
+	for otherUID, devices := range preparedClaims {
+		if otherUID == claimUID {
+			continue
+		}
+		for _, d := range devices {
+			isPartial, found := partial[poolDevice{d.PoolName, d.DeviceName}]
+			if found && (!isPartial || d.ShareID == "") {
+				return fmt.Errorf("device %s/%s is already prepared for claim %s, and the two allocations are not both shares of it", d.PoolName, d.DeviceName, otherUID)
+			}
+		}
+	}
+	return nil
+}
+
+// vfioConfigWins reports whether the config that the prepare loop would apply
+// to result is a VfioDeviceConfig. It walks configs with the same precedence as
+// that loop: last matching config first, VFIO configs only with the
+// VFIOPassthrough gate on. It is only used for whole GPUs that are not yet
+// converted, so a GpuConfig always applies when reached.
+func vfioConfigWins(configs []*OpaqueDeviceConfig, result *resourceapi.DeviceRequestAllocationResult) bool {
+	for _, c := range slices.Backward(configs) {
+		if len(c.Requests) != 0 && !slices.Contains(c.Requests, result.Request) {
+			continue
+		}
+		switch c.Config.(type) {
+		case *configapi.VfioDeviceConfig:
+			if featuregates.Enabled(featuregates.VFIOPassthrough) {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 func (s *DeviceState) unprepareDevices(claimUID string, devices PreparedDevices) error {

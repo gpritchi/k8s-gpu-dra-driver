@@ -107,15 +107,21 @@ func (cdi *CDIHandler) CreateCommonSpecFile() error {
 // shares of the same synthetic-partition device, which would otherwise produce
 // duplicate CDI device names within a single spec. Appending the partition slot
 // keeps them distinct and names the physical partition the container receives.
-// Devices without a slot (regular GPUs, VFIO) keep the original two-part name.
+// A shared whole GPU (WholeGPUSharing) has no slot, but one claim can still hold
+// several shares of it (one per request), so its shares are told apart by their
+// ShareID instead. Devices with neither (regular GPUs, VFIO) keep the original
+// two-part name.
 //
 // CreateClaimSpecFile and GetClaimDevices must agree on this name, so both go
 // through here.
 func cdiDeviceName(claimUID string, device *PreparedDevice) string {
-	if device.PartitionSlot == nil {
-		return fmt.Sprintf("%s-%s", claimUID, device.DeviceName)
+	if device.PartitionSlot != nil {
+		return fmt.Sprintf("%s-%s-slot%d", claimUID, device.DeviceName, *device.PartitionSlot)
 	}
-	return fmt.Sprintf("%s-%s-slot%d", claimUID, device.DeviceName, *device.PartitionSlot)
+	if device.ShareID != "" {
+		return fmt.Sprintf("%s-%s-share-%s", claimUID, device.DeviceName, device.ShareID)
+	}
+	return fmt.Sprintf("%s-%s", claimUID, device.DeviceName)
 }
 
 func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, devices PreparedDevices) error {
