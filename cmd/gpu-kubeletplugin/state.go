@@ -82,6 +82,13 @@ type PreparedDevice struct {
 	// ShareKey identifies the allocation share this device represents (see
 	// ShareKey). Persisted so Unprepare releases the exact slot that was reserved.
 	ShareKey string `json:"shareKey,omitempty"`
+
+	// ShareID is the allocation's ShareID when this device is a share of a whole
+	// GPU (WholeGPUSharing): one claim may hold several shares of one GPU, and the
+	// CDI device name needs it to tell them apart. Empty for everything else, so
+	// checkpoints without whole-GPU shares stay readable by drivers that predate
+	// the field (see CheckpointV1).
+	ShareID string `json:"shareID,omitempty"`
 }
 
 func (pds PreparedDevices) GetDevices() []*drapbv1.Device {
@@ -804,20 +811,35 @@ func (s *DeviceState) prepareDevicesWithCheckpoint(claim *resourceapi.ResourceCl
 
 			// Record the partition slot so the CDI device name is unique per share
 			// and can be rebuilt identically on unprepare.
-			if allocDev := s.allocatable[result.Device]; allocDev != nil && allocDev.SyntheticPartition != nil && s.partitionState != nil {
+			allocDev := s.allocatable[result.Device]
+			if allocDev != nil && allocDev.SyntheticPartition != nil && s.partitionState != nil {
 				gpuIndex := allocDev.SyntheticPartition.GPUIndex
 				if slot, ok := s.partitionState.GetAssignedSlot(gpuIndex, key); ok {
 					device.PartitionSlot = &slot
 				}
 			}
+			device.ShareID = wholeGPUShareID(result, allocDev)
 
-			// Built after PartitionSlot is set: the CDI device name embeds the slot.
+			// Built after PartitionSlot and ShareID are set: the CDI device name
+			// embeds them.
 			device.CdiDeviceIds = s.cdi.GetClaimDevices(claimUID, []*PreparedDevice{device})
 			preparedDevices = append(preparedDevices, device)
 		}
 	}
 
 	return preparedDevices, nil
+}
+
+// wholeGPUShareID returns the ShareID to record on a prepared whole GPU, or ""
+// when there is none. A share of a whole GPU has no partition slot, so its
+// ShareID is what keeps its CDI device name unique within the claim. Only whole
+// GPUs record it: synthetic partitions are told apart by slot, and leaving the
+// field empty for them keeps their checkpoints readable by older drivers.
+func wholeGPUShareID(result *resourceapi.DeviceRequestAllocationResult, allocDev *AllocatableDevice) string {
+	if result.ShareID == nil || allocDev == nil || allocDev.AmdGpu == nil {
+		return ""
+	}
+	return string(*result.ShareID)
 }
 
 // holdsPartOfSharedGPU reports whether result books less than all the memory of

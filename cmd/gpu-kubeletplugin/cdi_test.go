@@ -75,19 +75,19 @@ func TestCDIDeviceName(t *testing.T) {
 			want:   "uid-gpu-1-128",
 		},
 		"share of a whole GPU": {
-			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/gpu-1-128/abc"},
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/gpu-1-128/abc", ShareID: "abc"},
 			want:   "uid-gpu-1-128-share-abc",
-		},
-		"firstAvailable subrequest, no share": {
-			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/big/gpu-1-128/"},
-			want:   "uid-gpu-1-128",
 		},
 		"firstAvailable subrequest, share": {
-			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/big/gpu-1-128/abc"},
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-1-128"}, ShareKey: "uid/gpu/big/gpu-1-128/abc", ShareID: "abc"},
 			want:   "uid-gpu-1-128-share-abc",
 		},
+		"ShareID in the share key only (synthetic partition without a slot)": {
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-0-cpx-nps4"}, ShareKey: "uid/gpu/gpu-0-cpx-nps4/abc"},
+			want:   "uid-gpu-0-cpx-nps4",
+		},
 		"partition slot wins over share": {
-			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-0-cpx-nps4"}, ShareKey: "uid/gpu/gpu-0-cpx-nps4/abc", PartitionSlot: &slot},
+			device: &PreparedDevice{Device: drapbv1.Device{DeviceName: "gpu-0-cpx-nps4"}, ShareKey: "uid/gpu/gpu-0-cpx-nps4/abc", PartitionSlot: &slot, ShareID: "abc"},
 			want:   "uid-gpu-0-cpx-nps4-slot2",
 		},
 	}
@@ -110,8 +110,8 @@ func TestCreateClaimSpecFile_TwoSharesOfOneGPU(t *testing.T) {
 		return &cdiapi.ContainerEdits{ContainerEdits: &cdispec.ContainerEdits{Env: []string{"SHARE=1"}}}
 	}
 	devices := PreparedDevices{
-		{Device: drapbv1.Device{RequestNames: []string{"a"}, DeviceName: "gpu-1-128"}, ShareKey: "claim-uid/a/gpu-1-128/share-a", ContainerEdits: edits()},
-		{Device: drapbv1.Device{RequestNames: []string{"b"}, DeviceName: "gpu-1-128"}, ShareKey: "claim-uid/b/gpu-1-128/share-b", ContainerEdits: edits()},
+		{Device: drapbv1.Device{RequestNames: []string{"a"}, DeviceName: "gpu-1-128"}, ShareKey: "claim-uid/a/gpu-1-128/share-a", ShareID: "share-a", ContainerEdits: edits()},
+		{Device: drapbv1.Device{RequestNames: []string{"b"}, DeviceName: "gpu-1-128"}, ShareKey: "claim-uid/b/gpu-1-128/share-b", ShareID: "share-b", ContainerEdits: edits()},
 	}
 	require.NoError(t, handler.CreateClaimSpecFile("claim-uid", devices))
 

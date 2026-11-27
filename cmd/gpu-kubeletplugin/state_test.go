@@ -33,6 +33,7 @@ limitations under the License.
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -428,6 +429,61 @@ func TestHoldsPartOfSharedGPU(t *testing.T) {
 			assert.Equal(t, test.want, holdsPartOfSharedGPU(&test.result, test.device))
 		})
 	}
+}
+
+func TestWholeGPUShareID(t *testing.T) {
+	shareID := types.UID("4f6c1a2e-0000-4000-8000-000000000006")
+	tests := map[string]struct {
+		result resourceapi.DeviceRequestAllocationResult
+		device *AllocatableDevice
+		want   string
+	}{
+		"share of a whole GPU": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
+			device: newSharedGPUDevice(),
+			want:   string(shareID),
+		},
+		"whole GPU without a ShareID": {
+			result: resourceapi.DeviceRequestAllocationResult{},
+			device: newSharedGPUDevice(),
+		},
+		"synthetic partition keeps its slot naming": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
+			device: &AllocatableDevice{SyntheticPartition: &SyntheticPartitionDevice{}},
+		},
+		"VFIO device": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
+			device: &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{}},
+		},
+		"device no longer allocatable": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, test.want, wholeGPUShareID(&test.result, test.device))
+		})
+	}
+}
+
+// Drivers that predate PreparedDevice.ShareID re-marshal the checkpoint to verify
+// its checksum. An unset ShareID must not change the bytes, or they would reject
+// checkpoints that hold no whole-GPU shares.
+func TestPreparedDeviceShareIDOmittedWhenEmpty(t *testing.T) {
+	out, err := json.Marshal(PreparedDevice{
+		Device:   drapbv1.Device{DeviceName: "gpu-1-128"},
+		ShareKey: "uid/gpu/gpu-1-128/",
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, string(out), "shareID")
+
+	out, err = json.Marshal(PreparedDevice{
+		Device:   drapbv1.Device{DeviceName: "gpu-1-128"},
+		ShareKey: "uid/gpu/gpu-1-128/abc",
+		ShareID:  "abc",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, string(out), `"shareID":"abc"`)
 }
 
 // A claim holding 2Gi of a shared GPU must not be able to rebind the whole GPU
