@@ -34,7 +34,6 @@ package main
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	klog "k8s.io/klog/v2"
@@ -119,22 +118,10 @@ func cdiDeviceName(claimUID string, device *PreparedDevice) string {
 	if device.PartitionSlot != nil {
 		return fmt.Sprintf("%s-%s-slot%d", claimUID, device.DeviceName, *device.PartitionSlot)
 	}
-	if shareID := shareIDFromKey(device.ShareKey); shareID != "" {
-		return fmt.Sprintf("%s-%s-share-%s", claimUID, device.DeviceName, shareID)
+	if device.ShareID != "" {
+		return fmt.Sprintf("%s-%s-share-%s", claimUID, device.DeviceName, device.ShareID)
 	}
 	return fmt.Sprintf("%s-%s", claimUID, device.DeviceName)
-}
-
-// shareIDFromKey returns the ShareID part of a share key (see ShareKey), or ""
-// when the allocation has none. The ShareID is the last segment: the request
-// name before it may itself contain "/" (a firstAvailable subrequest is
-// "<request>/<subrequest>"), but claim UIDs, device names and ShareIDs never do.
-func shareIDFromKey(shareKey string) string {
-	i := strings.LastIndex(shareKey, "/")
-	if i < 0 {
-		return ""
-	}
-	return shareKey[i+1:]
 }
 
 func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, devices PreparedDevices) error {
