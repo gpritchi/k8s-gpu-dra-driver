@@ -34,6 +34,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	klog "k8s.io/klog/v2"
@@ -107,15 +108,33 @@ func (cdi *CDIHandler) CreateCommonSpecFile() error {
 // shares of the same synthetic-partition device, which would otherwise produce
 // duplicate CDI device names within a single spec. Appending the partition slot
 // keeps them distinct and names the physical partition the container receives.
-// Devices without a slot (regular GPUs, VFIO) keep the original two-part name.
+// A shared whole GPU (WholeGPUSharing) has no slot, but one claim can still hold
+// several shares of it (one per request), so its shares are told apart by their
+// ShareID instead. Devices with neither (regular GPUs, VFIO) keep the original
+// two-part name.
 //
 // CreateClaimSpecFile and GetClaimDevices must agree on this name, so both go
 // through here.
 func cdiDeviceName(claimUID string, device *PreparedDevice) string {
-	if device.PartitionSlot == nil {
-		return fmt.Sprintf("%s-%s", claimUID, device.DeviceName)
+	if device.PartitionSlot != nil {
+		return fmt.Sprintf("%s-%s-slot%d", claimUID, device.DeviceName, *device.PartitionSlot)
 	}
-	return fmt.Sprintf("%s-%s-slot%d", claimUID, device.DeviceName, *device.PartitionSlot)
+	if shareID := shareIDFromKey(device.ShareKey); shareID != "" {
+		return fmt.Sprintf("%s-%s-share-%s", claimUID, device.DeviceName, shareID)
+	}
+	return fmt.Sprintf("%s-%s", claimUID, device.DeviceName)
+}
+
+// shareIDFromKey returns the ShareID part of a share key (see ShareKey), or ""
+// when the allocation has none. The ShareID is the last segment: the request
+// name before it may itself contain "/" (a firstAvailable subrequest is
+// "<request>/<subrequest>"), but claim UIDs, device names and ShareIDs never do.
+func shareIDFromKey(shareKey string) string {
+	i := strings.LastIndex(shareKey, "/")
+	if i < 0 {
+		return ""
+	}
+	return shareKey[i+1:]
 }
 
 func (cdi *CDIHandler) CreateClaimSpecFile(claimUID string, devices PreparedDevices) error {

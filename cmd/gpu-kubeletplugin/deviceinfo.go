@@ -29,6 +29,11 @@ import (
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 )
 
+// sharedMemoryRequestMin is the smallest memory a claim can book on a shared
+// whole GPU (WholeGPUSharing). Smaller explicit requests, including 0, are
+// rounded up to it.
+var sharedMemoryRequestMin = resource.MustParse("1Mi")
+
 // AmdGpuInfo represents a full AMD GPU device
 type AmdGpuInfo struct {
 	UUID             string
@@ -47,6 +52,10 @@ type AmdGpuInfo struct {
 	pcieRootAttr     deviceattribute.DeviceAttribute
 	pciBusIDAttr     deviceattribute.DeviceAttribute
 	numaNodeAttr     deviceattribute.DeviceAttribute
+
+	// AllowSharing publishes the GPU as shareable by several claims through
+	// consumable capacity (WholeGPUSharing feature gate).
+	AllowSharing bool
 }
 
 // AmdPartitionInfo represents a partition of an AMD GPU
@@ -93,7 +102,7 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 	if d.numaNodeAttr.Name != "" {
 		attributes[d.numaNodeAttr.Name] = d.numaNodeAttr.Value
 	}
-	return resourceapi.Device{
+	device := resourceapi.Device{
 		Name:       d.CanonicalName(),
 		Attributes: attributes,
 		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
@@ -102,6 +111,37 @@ func (d *AmdGpuInfo) GetDevice() resourceapi.Device {
 			"simdUnits":    {Value: *resource.NewQuantity(int64(d.SimdUnits), resource.BinarySI)},
 		},
 	}
+
+	// Sharing needs a known VRAM size: with memory published as the 0 sentinel,
+	// a claim that requests no memory would consume nothing and any number of
+	// "exclusive" claims could land on the same GPU.
+	if d.AllowSharing && d.MemoryBytes >= uint64(sharedMemoryRequestMin.Value()) {
+		device.AllowMultipleAllocations = ptr.To(true)
+		// memory: a claim that does not request it consumes the full value
+		// (Default), so a plain claim still gets the GPU to itself. An explicit
+		// request is raised to at least sharedMemoryRequestMin. Without that floor
+		// a request for 0 would consume nothing and fit beside an exclusive claim,
+		// since the scheduler only checks that the sum stays within the capacity.
+		memory := device.Capacity["memory"]
+		memory.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+			Default:    ptr.To(memory.Value.DeepCopy()),
+			ValidRange: &resourceapi.CapacityRequestPolicyRange{Min: ptr.To(sharedMemoryRequestMin.DeepCopy())},
+		}
+		device.Capacity["memory"] = memory
+		// Compute and SIMD units are time-shared, not divided, so a claim consumes
+		// none of them unless it asks; otherwise a memory-only claim would take
+		// all units by default and nothing could share the GPU.
+		zero := *resource.NewQuantity(0, resource.DecimalSI)
+		for _, name := range []resourceapi.QualifiedName{"computeUnits", "simdUnits"} {
+			c := device.Capacity[name]
+			c.RequestPolicy = &resourceapi.CapacityRequestPolicy{
+				Default:    ptr.To(zero),
+				ValidRange: &resourceapi.CapacityRequestPolicyRange{Min: ptr.To(zero)},
+			}
+			device.Capacity[name] = c
+		}
+	}
+	return device
 }
 
 // AmdGpuVFIOInfo represents a GIM SR-IOV VF for VFIO passthrough
