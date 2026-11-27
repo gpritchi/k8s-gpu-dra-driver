@@ -39,6 +39,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	configapi "github.com/ROCm/k8s-gpu-dra-driver/api/amd.com/resource/gpu/v1alpha1"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
@@ -392,6 +393,8 @@ func TestHoldsPartOfSharedGPU(t *testing.T) {
 	part := resource.MustParse("2Gi")
 	notShared := newSharedGPUDevice()
 	notShared.AmdGpu.AllowSharing = false
+	unknownVRAM := newSharedGPUDevice()
+	unknownVRAM.AmdGpu.MemoryBytes = 0
 
 	tests := map[string]struct {
 		result resourceapi.DeviceRequestAllocationResult
@@ -415,9 +418,24 @@ func TestHoldsPartOfSharedGPU(t *testing.T) {
 			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
 			device: newSharedGPUDevice(),
 		},
-		"sharing off": {
+		"gate turned off after the share was allocated": {
 			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": part}},
 			device: notShared,
+			want:   true,
+		},
+		"VRAM unreadable this boot": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": part}},
+			device: unknownVRAM,
+			want:   true,
+		},
+		"GPU converted to VFIO": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": part}},
+			device: &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{convertedFrom: newSharedGPUDevice().AmdGpu}},
+			want:   true,
+		},
+		"pre-discovered VFIO device": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": part}},
+			device: &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{}},
 		},
 		"not a whole GPU": {
 			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": part}},
@@ -433,30 +451,36 @@ func TestHoldsPartOfSharedGPU(t *testing.T) {
 
 func TestWholeGPUShareID(t *testing.T) {
 	shareID := types.UID("4f6c1a2e-0000-4000-8000-000000000006")
+	part := map[resourceapi.QualifiedName]resource.Quantity{"memory": resource.MustParse("2Gi")}
+	full := map[resourceapi.QualifiedName]resource.Quantity{"memory": *resource.NewQuantity(16*1024*1024*1024, resource.BinarySI)}
 	tests := map[string]struct {
 		result resourceapi.DeviceRequestAllocationResult
 		device *AllocatableDevice
 		want   string
 	}{
 		"share of a whole GPU": {
-			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: part},
 			device: newSharedGPUDevice(),
 			want:   string(shareID),
+		},
+		"exclusive allocation of a shareable GPU": {
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: full},
+			device: newSharedGPUDevice(),
 		},
 		"whole GPU without a ShareID": {
 			result: resourceapi.DeviceRequestAllocationResult{},
 			device: newSharedGPUDevice(),
 		},
 		"synthetic partition keeps its slot naming": {
-			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: part},
 			device: &AllocatableDevice{SyntheticPartition: &SyntheticPartitionDevice{}},
 		},
 		"VFIO device": {
-			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: part},
 			device: &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{}},
 		},
 		"device no longer allocatable": {
-			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID},
+			result: resourceapi.DeviceRequestAllocationResult{ShareID: &shareID, ConsumedCapacity: part},
 		},
 	}
 	for name, test := range tests {
@@ -537,26 +561,88 @@ func TestPrepareDevices_VFIORejectedOnPartOfSharedGPU(t *testing.T) {
 	}
 }
 
-// WholeGPUSharing relies on the overlap guard letting a second claim's share of
-// a GPU through while another claim's share of it is prepared.
-func TestValidateNoOverlappingPreparedDevices_WholeGPUShares(t *testing.T) {
+// Two claims may have one whole GPU prepared only when both hold a partial share
+// of it. upstream's validateNoOverlappingPreparedDevices skips every result with
+// a ShareID, so validateWholeGPUShares has to catch an exclusive allocation on
+// either side.
+func TestValidateWholeGPUShares(t *testing.T) {
 	firstShare := "4f6c1a2e-0000-4000-8000-000000000004"
 	secondShare := types.UID("4f6c1a2e-0000-4000-8000-000000000005")
-	prepared := PreparedClaims{
-		"claim-a": {{
-			Device:   drapbv1.Device{PoolName: "node", DeviceName: "gpu-0-128"},
-			ShareKey: ShareKey("claim-a", "gpu", "gpu-0-128", &firstShare),
-		}},
+	full := *resource.NewQuantity(16*1024*1024*1024, resource.BinarySI)
+	part := resource.MustParse("2Gi")
+
+	preparedShare := &PreparedDevice{
+		Device:   drapbv1.Device{PoolName: "node", DeviceName: "gpu-0-128"},
+		ShareKey: ShareKey("claim-a", "gpu", "gpu-0-128", &firstShare),
+		ShareID:  firstShare,
 	}
-	claim := &resourceapi.ResourceClaim{
-		ObjectMeta: metav1.ObjectMeta{UID: "claim-b"},
-		Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
-			Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{{
-				Request: "gpu", Driver: consts.DriverName, Pool: "node", Device: "gpu-0-128", ShareID: &secondShare,
-			}}},
-		}},
+	// Exclusive while sharing is on: a ShareID in the key, none recorded.
+	preparedExclusive := &PreparedDevice{
+		Device:   drapbv1.Device{PoolName: "node", DeviceName: "gpu-0-128"},
+		ShareKey: ShareKey("claim-a", "gpu", "gpu-0-128", &firstShare),
 	}
-	assert.NoError(t, validateNoOverlappingPreparedDevices(claim, prepared))
+	claimFor := func(consumed resource.Quantity) *resourceapi.ResourceClaim {
+		return &resourceapi.ResourceClaim{
+			ObjectMeta: metav1.ObjectMeta{UID: "claim-b"},
+			Status: resourceapi.ResourceClaimStatus{Allocation: &resourceapi.AllocationResult{
+				Devices: resourceapi.DeviceAllocationResult{Results: []resourceapi.DeviceRequestAllocationResult{{
+					Request: "gpu", Driver: consts.DriverName, Pool: "node", Device: "gpu-0-128", ShareID: &secondShare,
+					ConsumedCapacity: map[resourceapi.QualifiedName]resource.Quantity{"memory": consumed},
+				}}},
+			}},
+		}
+	}
+	converted := &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{convertedFrom: newSharedGPUDevice().AmdGpu}}
+
+	tests := map[string]struct {
+		prepared    *PreparedDevice
+		allocatable *AllocatableDevice
+		consumed    resource.Quantity
+		wantErr     bool
+	}{
+		"share beside a share":                 {prepared: preparedShare, allocatable: newSharedGPUDevice(), consumed: part},
+		"exclusive beside a share":             {prepared: preparedShare, allocatable: newSharedGPUDevice(), consumed: full, wantErr: true},
+		"share beside an exclusive":            {prepared: preparedExclusive, allocatable: newSharedGPUDevice(), consumed: part, wantErr: true},
+		"exclusive beside an exclusive":        {prepared: preparedExclusive, allocatable: newSharedGPUDevice(), consumed: full, wantErr: true},
+		"share of a GPU converted to VFIO":     {prepared: preparedExclusive, allocatable: converted, consumed: part, wantErr: true},
+		"synthetic partitions are not checked": {prepared: preparedExclusive, allocatable: &AllocatableDevice{SyntheticPartition: &SyntheticPartitionDevice{}}, consumed: part},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			claim := claimFor(test.consumed)
+			prepared := PreparedClaims{"claim-a": {test.prepared}}
+			// upstream's guard always lets ShareID results through ...
+			require.NoError(t, validateNoOverlappingPreparedDevices(claim, prepared))
+			// ... so this check decides.
+			err := validateWholeGPUShares(claim, prepared, AllocatableDevices{"gpu-0-128": test.allocatable})
+			if test.wantErr {
+				assert.ErrorContains(t, err, "already prepared for claim claim-a")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+
+	t.Run("same claim is not checked against itself", func(t *testing.T) {
+		claim := claimFor(full)
+		prepared := PreparedClaims{"claim-b": {preparedExclusive}}
+		assert.NoError(t, validateWholeGPUShares(claim, prepared, AllocatableDevices{"gpu-0-128": newSharedGPUDevice()}))
+	})
+}
+
+// The VFIO pre-pass must pick the config the prepare loop would apply: the last
+// matching one wins.
+func TestVfioConfigWins(t *testing.T) {
+	enableVFIOPassthrough(t)
+	gpuDefault := &OpaqueDeviceConfig{Requests: []string{}, Config: configapi.DefaultGpuConfig()}
+	vfioAll := &OpaqueDeviceConfig{Requests: []string{}, Config: &configapi.VfioDeviceConfig{}}
+	gpuForRequest := &OpaqueDeviceConfig{Requests: []string{"gpu"}, Config: configapi.DefaultGpuConfig()}
+	vfioOther := &OpaqueDeviceConfig{Requests: []string{"other"}, Config: &configapi.VfioDeviceConfig{}}
+	result := &resourceapi.DeviceRequestAllocationResult{Request: "gpu"}
+
+	assert.True(t, vfioConfigWins([]*OpaqueDeviceConfig{gpuDefault, vfioAll}, result), "a later VFIO config wins")
+	assert.False(t, vfioConfigWins([]*OpaqueDeviceConfig{gpuDefault, vfioAll, gpuForRequest}, result), "a later GpuConfig for the request wins")
+	assert.False(t, vfioConfigWins([]*OpaqueDeviceConfig{gpuDefault, vfioOther}, result), "a VFIO config for another request does not apply")
 }
 
 // enableVFIOPassthrough turns on the VFIOPassthrough gate for one test.
