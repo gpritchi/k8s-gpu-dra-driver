@@ -103,7 +103,9 @@ How capacities are consumed:
 - **`memory`:** a claim that does not request it consumes all of it, so plain
   claims keep exclusive access to the GPU and are never placed on a GPU that is
   already shared. An explicit request below `1Mi`, including `0`, is rounded up
-  to `1Mi`, so it cannot fit beside an exclusive claim.
+  to `1Mi`, so it cannot fit beside an exclusive claim. (From Kubernetes 1.38
+  the API server rejects negative requests, but `0` is still accepted, so the
+  floor is still needed.)
 - **`computeUnits` and `simdUnits`:** these default to `0`. Compute is
   time-shared between processes rather than divided, so a memory-only claim
   doesn't block others. An explicit request is bookkeeping only: it reserves no
@@ -120,15 +122,25 @@ whole GPU in normal mode and can be shared. Partitions are unaffected: synthetic
 partition devices (`AutoPartition`) and pre-partitioned CPX/DPX/QPX devices keep
 their own allocation rules.
 
+The gate applies to every node the driver runs on. To share GPUs on some nodes
+only, install the chart twice with different node selectors, with the gate on in
+one release.
+
 #### Isolation and security
 
 This is scheduler accounting only. The driver does not limit how much VRAM or
 compute a container actually uses.
 
-- **VRAM:** a workload that allocates more than it booked can cause
-  out-of-memory errors in the others. Usable VRAM is also a little less than the
-  published `memory` (driver, firmware and display reservations), so bookings
-  that add up to the whole GPU can still run out. Leave headroom.
+- **VRAM:** a workload can allocate more than it booked, and nothing reports
+  it. Once the GPU's VRAM is actually full, what happens to the next allocation
+  depends on the runtime. With Vulkan (RADV), it spills to system memory over
+  PCIe, with no error and no reset, and runs far slower. In testing (llama.cpp
+  on an MI25), the workload that allocated last dropped from about 48 to about
+  1 token/s, while the earlier ones kept their speed. With ROCm/HIP, expect the
+  allocation to fail with an out-of-memory error instead. Usable VRAM is also a
+  little less than the published `memory` (driver, firmware and display
+  reservations), so bookings that add up to the whole GPU can still run out.
+  Leave headroom.
 - **Faults:** amdgpu isolates processes by per-process GPU page tables (each
   has its own GPU virtual address space). But there is no fault isolation: a hang
   or GPU reset caused by one workload kills every context on that GPU. There is
@@ -144,9 +156,9 @@ compute a container actually uses.
   sharers.
 - **Admin access:** a claim with `adminAccess: true` goes through the same
   capacity check as any other (Kubernetes 1.36 and later; unchanged upstream as
-  of October 2026). A plain admin claim
-  needs the whole GPU free, and an explicit one needs at least `1Mi` free. So an
-  admin claim cannot attach to a fully booked GPU.
+  of November 2026). A plain admin claim needs the whole GPU free, and an
+  explicit one needs at least `1Mi` free. So an admin claim cannot attach to a
+  fully booked GPU.
 - **`allocationMode: All`:** before Kubernetes 1.37, All-mode allocation skips
   multi-allocation devices that are fully booked, instead of failing. A claim
   for all GPUs on a node can then succeed with only the GPUs that are still free
