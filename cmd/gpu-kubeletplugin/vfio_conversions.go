@@ -23,6 +23,7 @@ import (
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/amdgpu"
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 	"k8s.io/dynamic-resource-allocation/deviceattribute"
 	klog "k8s.io/klog/v2"
 )
@@ -213,6 +214,8 @@ func (s *DeviceState) recoverVfioConversions(records map[string]map[string]*Vfio
 				pciBusIDAttr:     pciBusIDAttr,
 				pcieRootAttr:     pcieRootAttr,
 				numaNodeAttr:     numaNodeAttr,
+				// Discovery sets this from the gate; the record doesn't carry it.
+				AllowSharing: featuregates.Enabled(featuregates.WholeGPUSharing),
 			}
 			s.allocatable[name] = &AllocatableDevice{Vfio: &AmdGpuVFIOInfo{
 				PCIAddress:         rec.PCIAddress,

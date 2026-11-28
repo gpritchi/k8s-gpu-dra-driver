@@ -214,6 +214,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					ComputeUnits:     computeUnits,
 					NumaNode:         gpuInfoMap["numaNode"].(int),
 					MemoryBytes:      totalMemory,
+					AllowSharing:     featuregates.Enabled(featuregates.WholeGPUSharing),
 				}
 				device := &AllocatableDevice{AmdGpu: amdGpuInfo}
 				alldevices[device.CanonicalName()] = device
@@ -278,6 +279,7 @@ func enumerateAllPossibleDevices(enableSyntheticPartition bool) (AllocatableDevi
 					ComputeUnits:     computeUnits,
 					NumaNode:         gpuInfoMap["numaNode"].(int),
 					MemoryBytes:      getMemoryBytes(gpuInfoMap, "device", pciAddr),
+					AllowSharing:     featuregates.Enabled(featuregates.WholeGPUSharing),
 				}
 
 				// Create allocatable device for the full GPU
