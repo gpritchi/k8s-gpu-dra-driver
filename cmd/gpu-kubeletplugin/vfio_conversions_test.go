@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/ROCm/k8s-gpu-dra-driver/pkg/consts"
+	"github.com/ROCm/k8s-gpu-dra-driver/pkg/featuregates"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
@@ -211,6 +212,10 @@ func TestVfioConversions_RecoveredAfterRestart(t *testing.T) {
 			}},
 		},
 	}
+	// The restarted plugin runs with WholeGPUSharing on: the recovered original
+	// must be republished as shareable once it is restored.
+	require.NoError(t, featuregates.FeatureGates().Set("WholeGPUSharing=true"))
+	t.Cleanup(func() { _ = featuregates.FeatureGates().Set("WholeGPUSharing=false") })
 	restarted.recoverVfioConversions(cp.V1.VfioConversions, deviceattribute.WithFSFromRoot(filepath.Join(root, "sys")))
 
 	assert.NotContains(t, restarted.allocatable, "gpu-vfio-0", "discovery's duplicate must be dropped")
@@ -222,6 +227,7 @@ func TestVfioConversions_RecoveredAfterRestart(t *testing.T) {
 	assert.Equal(t, deviceattribute.StandardDeviceAttributeNUMANode, dev.Vfio.convertedFrom.numaNodeAttr.Name)
 	require.NotNil(t, dev.Vfio.convertedFrom.numaNodeAttr.Value.IntValue)
 	assert.Equal(t, int64(7), *dev.Vfio.convertedFrom.numaNodeAttr.Value.IntValue)
+	assert.True(t, dev.Vfio.convertedFrom.AllowSharing, "the recovered GPU must keep the gate's sharing setting")
 	assertPublished(t, restarted.allocatable, map[string]string{"gpu-0-128": consts.AmdGpuDeviceType})
 
 	require.NoError(t, restarted.Unprepare("claim-uid"))
